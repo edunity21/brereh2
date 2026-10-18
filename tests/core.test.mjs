@@ -212,3 +212,37 @@ test('시간 입력·표시', () => {
   assert.equal(C.fmtDelta(-168), '−2:48');
   assert.equal(C.fmtDelta(38), '+0:38');
 });
+
+test('반복해서 오는 인식 결과는 새로 말한 부분만 남긴다', () => {
+  assert.equal(C.newPart('', '안녕하십니까'), '안녕하십니까');
+  assert.equal(C.newPart('안녕하십니까', '안녕하십니까 관리번호 삼번입니다'), '관리번호 삼번입니다');
+  assert.equal(C.newPart('안녕 하십니까', '안녕하십니까 관리번호'), '관리번호');
+  assert.equal(C.newPart('안녕하십니까', '보고서를 말씀드리겠습니다'), '보고서를 말씀드리겠습니다');
+});
+
+test('속도 안내: 필요한 속도와 비교해 천천히·좋아요·빠르게를 알려 준다', () => {
+  // 2,163음절을 10분에: 필요한 속도 약 3.6음절/초
+  const base = { t: 60, cursor: 216, N: 2163, targetSec: 600 };
+  assert.equal(C.paceAdvice({ ...base, nowRate: 3.6 }).level, 'good');
+  assert.equal(C.paceAdvice({ ...base, nowRate: 5 }).level, 'slower2'); // 분당 300음절 → 더 천천히
+  assert.equal(C.paceAdvice({ ...base, nowRate: 4.0 }).level, 'slower');
+  assert.equal(C.paceAdvice({ ...base, nowRate: 3.1 }).level, 'faster');
+  assert.equal(C.paceAdvice({ ...base, nowRate: 2.5 }).level, 'faster2');
+  assert.equal(C.paceAdvice({ ...base, t: 5, nowRate: 3.6 }).level, 'measuring');
+  assert.equal(C.paceAdvice({ ...base, t: 598, nowRate: 3.6 }).level, 'over');
+  assert.equal(C.paceAdvice({ ...base, cursor: 2163, nowRate: 3.6 }).level, 'done');
+  const good = C.paceAdvice({ ...base, nowRate: 3.6 });
+  assert.ok(Math.abs(good.x - 0.5) < 0.02);
+  assert.equal(good.needSpm, 216);
+});
+
+test('최근 속도와 시간 문구', () => {
+  const hist = [];
+  for (let t = 0; t <= 40; t++) hist.push({ t, c: t * 3 });
+  assert.ok(Math.abs(C.recentRate(hist, 40, 120) - 3) < 0.01);
+  assert.equal(C.recentRate(hist, 5, 15), null);
+  assert.equal(C.humanDuration(167), '2분 47초');
+  assert.equal(C.humanDelta(-167), '목표보다 2분 47초 일찍');
+  assert.equal(C.humanDelta(38), '목표보다 38초 늦게');
+  assert.equal(C.humanDelta(3), '목표와 거의 같음');
+});

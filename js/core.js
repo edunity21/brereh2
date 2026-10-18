@@ -663,3 +663,86 @@ export function parseTime(str) {
 export function escapeHTML(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
+
+/* ───────────── 10. 음성 인식 결과 정리 ───────────── */
+
+/**
+ * 일부 기기(특히 안드로이드)는 새 인식 결과에 앞서 확정한 문장을 통째로 다시 붙여 보냅니다.
+ * prev(이번 세션에서 이미 받은 글)로 시작하면 그 뒤에 새로 말한 부분만 돌려줍니다.
+ */
+export function newPart(prev, txt) {
+  const t = String(txt ?? '');
+  const p = String(prev ?? '').replace(/\s+/g, '');
+  if (!p) return t;
+  if (!t.replace(/\s+/g, '').startsWith(p)) return t;
+  let need = p.length;
+  let i = 0;
+  while (i < t.length && need > 0) {
+    if (!/\s/.test(t[i])) need--;
+    i++;
+  }
+  return t.slice(i).trim();
+}
+
+/* ───────────── 11. 속도 안내 ───────────── */
+
+/** 최근 win초 동안의 말하기 속도(초당 음절). 기록이 짧으면 null */
+export function recentRate(history, t, cursor, win = 20) {
+  if (!history?.length || t < 8) return null;
+  let base = history[0];
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].t <= t - win) {
+      base = history[i];
+      break;
+    }
+  }
+  const dt = t - base.t;
+  return dt >= 6 ? Math.max(0, cursor - base.c) / dt : null;
+}
+
+export const PACE = {
+  measuring: { word: '속도 재는 중', tip: '조금만 말하면 속도를 알려 드려요' },
+  slower2: { word: '더 천천히', tip: '이대로면 목표보다 일찍 끝나요' },
+  slower: { word: '조금 천천히', tip: '살짝 빠릅니다' },
+  good: { word: '속도 좋아요', tip: '이대로 이어 가세요' },
+  faster: { word: '조금 빠르게', tip: '살짝 느립니다' },
+  faster2: { word: '더 빠르게', tip: '이대로면 목표 시간을 넘겨요' },
+  over: { word: '마무리하세요', tip: '목표 시간이 지났습니다' },
+  done: { word: '원고 끝', tip: '마무리 인사 후 ■' },
+};
+
+/**
+ * 지금 속도가 목표 시간에 맞는지 판정합니다.
+ * 필요한 속도 = 남은 음절 ÷ 목표까지 남은 시간. 지금 속도 ÷ 필요한 속도 = ratio.
+ * ratio 1이면 딱 맞음, 1보다 크면 빠름(천천히), 작으면 느림(빠르게).
+ * x는 속도계 바늘 위치(0 느림 ~ 0.5 적정 ~ 1 빠름).
+ */
+export function paceAdvice({ t, cursor, N, targetSec, nowRate }) {
+  const remainUnits = Math.max(0, N - cursor);
+  const remainSec = targetSec - t;
+  const nowSpm = nowRate > 0 ? Math.round(nowRate * 60) : null;
+  if (remainUnits <= 0) return { level: 'done', ratio: 1, x: 0.5, nowSpm, needSpm: null };
+  if (remainSec <= 5) return { level: 'over', ratio: 0, x: 0, nowSpm, needSpm: null };
+  const need = remainUnits / remainSec;
+  const needSpm = Math.round(need * 60);
+  if (t < 12 || !(nowRate > 0)) return { level: 'measuring', ratio: null, x: 0.5, nowSpm: null, needSpm };
+  const ratio = nowRate / need;
+  const level = ratio > 1.2 ? 'slower2' : ratio > 1.08 ? 'slower' : ratio >= 0.92 ? 'good' : ratio >= 0.8 ? 'faster' : 'faster2';
+  const x = Math.max(0, Math.min(1, 0.5 + (ratio - 1) / 0.6));
+  return { level, ratio, x, nowSpm, needSpm };
+}
+
+/** 90 → "1분 30초", 38 → "38초" */
+export function humanDuration(sec) {
+  const s = Math.round(Math.abs(sec || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (!m) return `${r}초`;
+  return r ? `${m}분 ${r}초` : `${m}분`;
+}
+
+/** 예측 − 목표 → "목표보다 2분 47초 일찍" / "38초 늦게" / "목표와 거의 같음" */
+export function humanDelta(delta) {
+  if (Math.abs(delta) < 5) return '목표와 거의 같음';
+  return `목표보다 ${humanDuration(delta)} ${delta < 0 ? '일찍' : '늦게'}`;
+}

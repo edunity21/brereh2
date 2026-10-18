@@ -157,30 +157,49 @@
 <!-- ───────── 2. 연습 화면 ───────── -->
 <section id="stage" class="view stage" hidden>
   <video id="cam" autoplay muted playsinline></video>
+
+  <!-- 위: 상태 표시줄 + 자막 (카메라 가까이에 두어 시선이 렌즈 쪽에 머물도록) -->
   <div class="stage-top">
-    <div class="rec-state" id="rec-state"><i></i><span>준비</span></div>
-    <div class="clock">
-      <strong id="elapsed">0:00</strong>
-      <span id="clock-sub">/ 10:00</span>
-      <small id="clock-left"></small>
+    <div class="topbar">
+      <div class="rec-state" id="rec-state"><i></i><span>준비</span></div>
+      <div class="top-right">
+        <button type="button" id="asr-chip" class="chip" title="누르면 음성 인식을 다시 켭니다">음성 인식</button>
+        <span class="meter" aria-hidden="true"><i id="meter"></i></span>
+        <button type="button" id="btn-font-down" class="icon" aria-label="자막 작게"><span class="fs-s">가</span></button>
+        <button type="button" id="btn-font-up" class="icon" aria-label="자막 크게"><span class="fs-l">가</span></button>
+        <button type="button" id="btn-full" class="icon" aria-label="전체 화면">⛶</button>
+        <button type="button" id="btn-close" class="icon" aria-label="닫기">✕</button>
+      </div>
     </div>
-    <div class="top-right">
-      <span id="asr-chip" class="chip">음성 인식</span>
-      <span class="meter" aria-hidden="true"><i id="meter"></i></span>
-      <button type="button" id="btn-font-down" class="icon" aria-label="자막 작게"><span class="fs-s">가</span></button>
-      <button type="button" id="btn-font-up" class="icon" aria-label="자막 크게"><span class="fs-l">가</span></button>
-      <button type="button" id="btn-full" class="icon" aria-label="전체 화면">⛶</button>
-      <button type="button" id="btn-close" class="icon" aria-label="닫기">✕</button>
-    </div>
-  </div>
-  <div id="banner" class="banner" role="status" hidden></div>
-  <div class="stage-bottom">
-    <div class="tl" id="tl"></div>
     <div class="subs" id="subs">
       <p class="sec-label" id="sec-label"></p>
       <p class="sub-cur" id="sub-cur"></p>
       <p class="sub-next" id="sub-next"></p>
     </div>
+  </div>
+
+  <!-- 아래: 시간 · 속도계 · 타임라인 · 조작 -->
+  <div class="stage-bottom">
+    <div id="banner" class="banner" role="status" hidden></div>
+    <div class="dash">
+      <div class="clock">
+        <strong id="elapsed">0:00</strong><span id="clock-sub">/ 10:00</span>
+        <small id="clock-left">녹화 한도 15:00</small>
+      </div>
+      <div class="pace" id="pace" data-level="measuring">
+        <div class="pace-head">
+          <b id="pace-word">속도 재는 중</b>
+          <span id="pace-tip"></span>
+        </div>
+        <div class="pace-gauge" aria-hidden="true">
+          <i class="zone z-slow"></i><i class="zone z-good"></i><i class="zone z-fast"></i>
+          <i class="needle" id="pace-needle"></i>
+        </div>
+        <div class="pace-scale"><span>느림 · 빠르게!</span><span>적정</span><span>빠름 · 천천히!</span></div>
+        <p class="pace-num" id="pace-num"></p>
+      </div>
+    </div>
+    <div class="tl" id="tl"></div>
     <div class="controls">
       <button type="button" id="btn-prev" class="ctl" aria-label="이전 문장">◀</button>
       <button type="button" id="btn-main" class="ctl main">● 녹화 시작</button>

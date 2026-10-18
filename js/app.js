@@ -157,15 +157,10 @@ function renderTimeline(el, d, { live = true, predLabel = '예측', titles = [] 
   let info;
   if (live) {
     const st = d.status;
-    const meta = [
-      d.kc < d.rec.length ? `지금 ${d.kc + 1}구간` : '원고 끝',
-      `권장 ${d.recNow + 1}구간`,
-      `${Math.round(d.rate * 60)}음절/분`,
-    ];
-    if (d.frozen) meta.push('추정 보류');
-    info = `<span class="st ${st}"><b>예측 종료 ${fmt(Math.round(d.total))}</b> ${C.fmtDelta(d.delta)} · ${C.STATUS_TEXT[st]}</span><span class="meta">${meta.join(' · ')}</span>`;
+    const where = d.kc < d.rec.length ? `지금 ${d.kc + 1}구간 · 권장 ${d.recNow + 1}구간` : '원고 끝';
+    info = `<span class="st ${st}"><b>예상 종료 ${fmt(Math.round(d.total))}</b> ${C.humanDelta(d.delta)}${d.frozen ? ' (추정 보류)' : ''}</span><span class="meta">${where}</span>`;
   } else {
-    info = `<span class="st ${d.status}"><b>${predLabel} ${fmt(Math.round(d.total))}</b> 목표 대비 ${C.fmtDelta(d.delta)}</span>`;
+    info = `<span class="st ${d.status}"><b>${predLabel} ${fmt(Math.round(d.total))}</b> ${C.humanDelta(d.delta)}</span>`;
   }
 
   el.innerHTML = `
@@ -500,6 +495,10 @@ function newSession(stream) {
     lastAsrAt: 0,
     voiceAt: 0,
     asrStatus: mode === 'auto' ? 'idle' : 'manual',
+    paceRate: null,
+    refreshStreak: 0,
+    lastRefreshAt: 0,
+    lastWarnToast: 0,
   };
 }
 
@@ -539,8 +538,9 @@ function renderAsrChip() {
   const map = {
     idle: ['음성 인식 대기', ''],
     listening: ['● 듣는 중', 'ok'],
-    restarting: ['재연결 중', 'warn'],
+    restarting: ['다시 연결 중', 'warn'],
     stopped: ['음성 인식 멈춤', ''],
+    blocked: ['멈춤 · 눌러서 다시 듣기', 'bad'],
     manual: ['탭해서 넘기기', 'manual'],
   };
   const [text, cls] = R.mode === 'manual' ? map.manual : map[R.asrStatus] || map.idle;
@@ -650,6 +650,28 @@ function updatePrediction(t) {
   });
   R.tl = tl;
   renderTimeline($('#tl'), { ...tl, t, target: R.targetSec, rate: R.rate, frozen: R.frozen }, { titles: model.sections.map((s) => s.title) });
+  renderPace(t, c);
+}
+
+/** 속도계: 지금 속도(최근 20초)를 '목표 시간에 맞게 끝내려면 필요한 속도'와 비교합니다. */
+function renderPace(t, c) {
+  const ses = R;
+  const live = ses.state === 'recording' || ses.state === 'paused';
+  const r = live ? C.recentRate(ses.history, t, c, 20) : null;
+  if (r != null && !ses.frozen && ses.state === 'recording') ses.paceRate = ses.paceRate == null ? r : ses.paceRate * 0.7 + r * 0.3;
+  const p = C.paceAdvice({ t, cursor: c, N: model.N, targetSec: ses.targetSec, nowRate: live ? ses.paceRate : null });
+  const info = C.PACE[p.level];
+  const el = $('#pace');
+  el.dataset.level = p.level;
+  $('#pace-word').textContent = !live ? '알맞은 속도' : info.word;
+  $('#pace-tip').textContent = !live ? '' : ses.frozen ? '음성 인식을 기다리는 중' : info.tip;
+  $('#pace-needle').style.left = `${(p.x * 100).toFixed(1)}%`;
+  $('#pace-num').innerHTML =
+    p.nowSpm != null && p.needSpm != null
+      ? `지금 <b>${p.nowSpm}</b> · 알맞은 속도 <b>${p.needSpm}</b> <small>음절/분</small>`
+      : p.needSpm != null
+        ? `목표 ${fmt(ses.targetSec)}에 맞추려면 분당 <b>${p.needSpm}</b>음절`
+        : '';
 }
 
 /* ── 녹화 흐름 ── */
@@ -736,9 +758,10 @@ function startSpeech(ses) {
   ses.speech = new Speech({
     onInterim: (txt) => {
       if (R !== ses || ses.state !== 'recording') return;
-      ses.lastAsrAt = performance.now();
       ses.pendingInterim = txt;
-      if (!txt || ses.interimTimer) return;
+      if (!txt) return;
+      asrAlive(ses);
+      if (ses.interimTimer) return;
       ses.interimTimer = setTimeout(() => {
         ses.interimTimer = null;
         const t = elapsed();
@@ -751,29 +774,73 @@ function startSpeech(ses) {
     onFinal: (txt) => {
       if (R !== ses || ses.state !== 'recording') return;
       const t = elapsed();
-      ses.lastAsrAt = performance.now();
+      asrAlive(ses);
       ses.pendingInterim = '';
       ses.transcript.push({ t: Math.round(t * 10) / 10, text: txt });
       if (ses.tracker.ingestFinal(txt, t)) ses.peekLevel = 0;
       checkForbidden(txt, t);
-      if (ses.frozen) {
-        ses.frozen = false;
-        banner('');
-      }
       renderSubs();
     },
     onStatus: (s) => {
       ses.asrStatus = s;
       if (R === ses) renderAsrChip();
     },
-    onError: (code, fatal) => {
+    onLog: (type, data) => {
+      if (R === ses) event(type, data);
+    },
+    onError: (code, kind) => {
       if (R !== ses) return;
-      event('asr-error', code);
-      if (fatal) fallbackManual(code);
-      else if (code === 'network') banner('음성 인식 서버에 연결할 수 없습니다. 네트워크를 확인하거나 ▶로 넘겨 주세요.');
+      // 처음부터 시작이 안 될 때만 자동으로 탭해서 넘기기로 바꿉니다.
+      if (kind === 'fatal') return fallbackManual(code);
+      if (kind === 'blocked') {
+        banner('음성 인식이 멈췄습니다. [다시 듣기]를 누르면 지금 위치부터 이어서 따라갑니다.', [
+          { label: '다시 듣기', fn: () => restartSpeech() },
+          { label: '탭해서 넘기기로', fn: () => fallbackManual(code) },
+        ]);
+        return;
+      }
+      // 일시적인 오류는 알아서 다시 연결합니다. 30초에 한 번만 알려 줍니다.
+      const now = performance.now();
+      if ((code === 'network' || code === 'audio-capture') && now - ses.lastWarnToast > 30000) {
+        ses.lastWarnToast = now;
+        toast(code === 'network' ? '음성 인식 연결이 불안정해 다시 연결하는 중입니다' : '마이크를 다시 연결하는 중입니다', 'warn');
+      }
     },
   });
   ses.speech.start();
+}
+
+/** 인식 결과가 들어오면 지킴이 상태를 풀어 줍니다. */
+function asrAlive(ses) {
+  ses.lastAsrAt = performance.now();
+  ses.refreshStreak = 0;
+  if (ses.frozen) {
+    ses.frozen = false;
+    banner('');
+  }
+}
+
+/** 사용자가 직접 음성 인식을 다시 켬. 탭 안에서 불려야 아이폰·아이패드에서도 다시 켜집니다. */
+function restartSpeech() {
+  const ses = R;
+  if (!ses || ses.state !== 'recording') return;
+  if (ses.mode !== 'auto') {
+    if (ses.modeStart !== 'auto' || !Speech.supported()) return;
+    ses.mode = 'auto';
+    renderStage();
+  }
+  if (!ses.speech) startSpeech(ses);
+  else {
+    ses.speech.stop();
+    ses.speech.start();
+  }
+  ses.lastAsrAt = performance.now();
+  ses.refreshStreak = 0;
+  ses.frozen = false;
+  banner('');
+  event('asr-manual-restart');
+  renderAsrChip();
+  toast('음성 인식을 다시 켰습니다');
 }
 
 function fallbackManual(code) {
@@ -848,11 +915,22 @@ function tick() {
   }
 
   const now = performance.now();
-  // 말하고 있는데 음성 인식이 오래 답이 없으면 예측을 멈추고 알려 줍니다.
-  if (ses.mode === 'auto' && t > 10 && now - ses.lastAsrAt > 9000 && now - ses.voiceAt < 1500 && !ses.frozen) {
-    ses.frozen = true;
-    event('asr-stall');
-    banner('음성 인식 응답이 없습니다. ▶로 넘기거나 탭해서 넘기기로 바꿀 수 있습니다.', [{ label: '탭해서 넘기기로', fn: () => fallbackManual('stall') }]);
+  // 음성 인식 지킴이: 말하는데 7초 넘게(말이 없어도 20초 넘게) 결과가 없으면 세션을 새로 고칩니다.
+  if (ses.mode === 'auto' && ses.speech && !ses.speech.blocked && t > 8) {
+    const quiet = now - ses.lastAsrAt;
+    const talking = now - ses.voiceAt < 1500;
+    if (((talking && quiet > 7000) || quiet > 20000) && now - ses.lastRefreshAt > 7000) {
+      ses.lastRefreshAt = now;
+      ses.refreshStreak++;
+      ses.speech.refresh('watchdog');
+      if (ses.refreshStreak >= 3 && !ses.frozen) {
+        ses.frozen = true;
+        banner('음성 인식이 응답하지 않아 계속 다시 연결하고 있습니다. ▶로 넘기며 이어 가도 됩니다.', [
+          { label: '다시 듣기', fn: () => restartSpeech() },
+          { label: '탭해서 넘기기로', fn: () => fallbackManual('stall') },
+        ]);
+      }
+    }
   }
 
   // 숨김·첫 글자 단계: 말이 멈추고 4초가 지나면 다음 어절을 살짝 보여 줍니다.
@@ -1031,6 +1109,9 @@ function initStage() {
     if (R?.mode === 'manual' && R.state === 'recording') moveSentence(1);
   });
   $('#btn-close').addEventListener('click', closeStage);
+  $('#asr-chip').addEventListener('click', () => {
+    if (R?.state === 'recording' && (R.mode === 'auto' || R.modeStart === 'auto')) restartSpeech();
+  });
   $('#btn-font-up').addEventListener('click', () => {
     S.font = Math.min(1.8, Math.round((S.font + 0.1) * 10) / 10);
     saveSettings();
