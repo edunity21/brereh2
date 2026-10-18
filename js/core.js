@@ -371,51 +371,87 @@ export class Tracker {
     return res;
   }
 
+  /**
+   * 잠정 결과: 말하는 중에 계속 바뀌는 인식 결과.
+   * - 위치는 앞으로만 갑니다. 짧거나 맞는 곳이 없는 결과가 와도 지금 위치를 그대로 둡니다.
+   * - 확정 결과가 늦게 오는 브라우저(문장을 이어 말하면 한참 확정하지 않음)를 위해,
+   *   믿을 만한 잠정 결과는 끝 15음절을 뺀 앞부분을 확정합니다.
+   */
   ingestInterim(text, t) {
-    this.tent.fill(0);
-    this.tentCursor = this.cursor;
     const q = toUnits(text, this.m.dict).map((u) => u.ch).slice(-300);
     if (q.length < 2) return false;
     const res = this._align(q);
     if (!res) return false;
-    let moved = false;
-    for (const [, r] of res.pairs) if (r >= this.cursor && this.status[r] === ST.TODO) this.tent[r] = 1;
     const end = res.pairs[res.pairs.length - 1][1] + 1;
-    if (end > this.cursor) {
+    this._noteMatch(end);
+    this.tent.fill(0);
+    for (const [, r] of res.pairs) if (r >= this.cursor && this.status[r] === ST.TODO) this.tent[r] = 1;
+    if (res.exact >= 10 && res.score >= 18 && res.pairs[0][1] <= this.focus + 40) {
+      const upto = end - 15;
+      let done = 0;
+      for (const [, r] of res.pairs) {
+        if (r >= upto) break;
+        this._say(r, t);
+        done = r + 1;
+      }
+      if (done > this.cursor) this.cursor = done;
+    }
+    let moved = false;
+    if (end > this.tentCursor) {
       this.tentCursor = end;
       moved = true;
       this.lastProgress = t;
     }
+    this.tentCursor = Math.max(this.tentCursor, this.cursor);
     this._enter(t);
     return moved;
   }
 
+  /**
+   * 확정 결과. 앞부분은 잠정 결과로 이미 맞췄을 수 있으므로 뒤쪽 300음절을 150음절씩 맞춥니다.
+   * 위치는 앞으로만 갑니다.
+   */
   ingestFinal(text, t) {
-    this.tent.fill(0);
-    this.tentCursor = this.cursor;
-    const all = toUnits(text, this.m.dict).map((u) => u.ch);
+    const q = toUnits(text, this.m.dict).map((u) => u.ch).slice(-300);
     let moved = false;
-    for (let off = 0; off < all.length; off += 150) {
-      const q = all.slice(off, off + 150);
-      if (q.length < 2) continue;
-      const res = this._align(q);
+    for (let off = 0; off < q.length; off += 150) {
+      const part = q.slice(off, off + 150);
+      if (part.length < 2) continue;
+      const res = this._align(part);
       if (!res) continue;
-      for (const [, r] of res.pairs) {
-        if (this.status[r] === ST.TODO) this.status[r] = ST.SAID;
-        const sid = this.m.units[r].sid;
-        if (this.first[sid] == null) this.first[sid] = t;
-        this.last[sid] = t;
-      }
+      for (const [, r] of res.pairs) this._say(r, t);
       const end = res.pairs[res.pairs.length - 1][1] + 1;
+      this._noteMatch(end);
       if (end > this.cursor) {
         this.cursor = end;
         moved = true;
         this.lastProgress = t;
       }
     }
-    this.tentCursor = this.cursor;
+    this.tent.fill(0);
+    this.tentCursor = Math.max(this.tentCursor, this.cursor);
     this._enter(t);
     return moved;
+  }
+
+  _say(r, t) {
+    if (this.status[r] === ST.TODO) this.status[r] = ST.SAID;
+    const sid = this.m.units[r].sid;
+    if (this.first[sid] == null) this.first[sid] = t;
+    this.last[sid] = t;
+  }
+
+  _noteMatch(end) {
+    this.lastMatchEnd = end;
+    this.matchSeq = (this.matchSeq || 0) + 1;
+  }
+
+  /** 음성 인식이 '지금 위치는 더 뒤'라고 거듭 알려 줄 때만 쓰는 되돌리기 (확정 위치 아래로는 가지 않음) */
+  correctTo(u, t) {
+    u = Math.max(this.cursor, Math.min(this.N, u));
+    this.tent.fill(0);
+    this.tentCursor = u;
+    this.setPred(u, t);
   }
 
   /** 다음 문장으로 넘기기. manual=true면 현재 문장을 '수동 완료'로 표시합니다. */
@@ -851,6 +887,7 @@ export class VoiceFollower {
       this.lastAnchor = anchor;
     }
     if (anchor > this.pos) this.pos = anchor;
+    const start = this.pos;
     const sid = this._sid(this.pos);
     if (sid !== this.sid) {
       this.sid = sid;
@@ -869,7 +906,9 @@ export class VoiceFollower {
 
     let limit = sen.u1 - 0.001; // 채우기만으로는 문장을 넘지 않습니다
     if (mode === 'follow') limit = Math.min(limit, anchor + 10);
-    this.pos = Math.max(anchor, Math.min(this.pos, limit));
+    // 한계에 닿으면 더 채우지 않을 뿐, 이미 채운 곳을 되돌리지는 않습니다
+    if (this.pos > limit) this.pos = Math.max(start, limit);
+    this.pos = Math.max(anchor, this.pos);
 
     // 음성 인식이 잘 될 때: 확정된 진행량 ÷ 말한 시간으로 속도 보정
     if (this.learnVoiced >= 4) {

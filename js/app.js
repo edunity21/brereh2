@@ -978,21 +978,33 @@ function asrHealthy(ses, now) {
  */
 function followStep(ses, dt, voiced, now) {
   const tr = ses.tracker;
-  const fm = ses.mode === 'manual' ? 'hold' : ses.mode === 'voice' ? 'lead' : asrHealthy(ses, now) ? 'follow' : 'lead';
+  let fm;
+  if (ses.mode === 'manual') fm = 'hold';
+  else if (ses.mode === 'voice') fm = 'lead';
+  else if (asrHealthy(ses, now)) fm = 'follow';
+  else if (ses.speech && !ses.speech.blocked && now - ses.lastAsrAt < 8000) fm = 'hold'; // 잠깐 늦는 것: 문장 안에서만 채우고 기다림
+  else fm = 'lead'; // 인식이 한동안 없음: 목소리와 쉼으로 다음 문장까지 이어 감
   if (fm !== ses.followMode) {
     ses.followMode = fm;
     renderAsrChip();
   }
-  const anchor = Math.max(tr.cursor, tr.tentCursor);
-  // 음성 감지로 앞서 나갔는데 음성 인식이 돌아와 실제 위치가 뒤라면 되돌립니다
-  if (fm === 'follow' && ses.follower.pos > anchor + 25) {
-    ses.follower.reset(anchor);
-    tr.setPred(anchor, elapsed());
-    renderSubs();
+  // 음성 감지로 앞서 나갔는데, 음성 인식이 '실제 위치는 25음절 넘게 뒤'라고 연달아 두 번 알려 줄 때만 되돌립니다.
+  if (fm === 'follow' && tr.matchSeq !== ses.seenMatch) {
+    ses.seenMatch = tr.matchSeq;
+    if (tr.lastMatchEnd < ses.follower.pos - 25) ses.behind = (ses.behind || 0) + 1;
+    else ses.behind = 0;
+    if (ses.behind >= 2) {
+      ses.behind = 0;
+      event('correct', { from: Math.round(ses.follower.pos), to: tr.lastMatchEnd });
+      tr.correctTo(tr.lastMatchEnd, elapsed());
+      ses.follower.reset(tr.focus);
+      renderSubs();
+    }
   }
+  const anchor = Math.max(tr.cursor, tr.tentCursor);
   if (ses.follower.step(dt, voiced, anchor, fm)) {
     const before = tr.current();
-    tr.setPred(ses.follower.pos, elapsed());
+    tr.setPred(Math.max(ses.follower.pos, tr.pred), elapsed());
     if (tr.current() !== before) ses.peekLevel = 0;
     renderSubs();
   }

@@ -296,3 +296,78 @@ test('인식 힌트 표현', () => {
   assert.ok(p.includes('BRIDGE-AI'));
   assert.ok(p.includes('ME'));
 });
+
+test('문장을 이어 말해 확정이 늦어도, 짧은 잠정 결과 때문에 앞으로 돌아가지 않는다', () => {
+  const m = sampleModel();
+  const tr = new C.Tracker(m);
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  let t = 0;
+  let said = '';
+  let maxFocus = 0;
+  const step = () => {
+    t += 0.05;
+    f.step(0.05, true, Math.max(tr.cursor, tr.tentCursor), 'follow');
+    tr.setPred(Math.max(f.pos, tr.pred), t);
+  };
+  for (let s = 0; s < 4; s++) {
+    for (const w of m.sentences[s].text.split(' ')) {
+      said += (said ? ' ' : '') + w;
+      for (let k = 0; k < 10; k++) step();
+      tr.ingestInterim(said, t);
+      assert.ok(tr.focus >= maxFocus);
+      maxFocus = tr.focus;
+    }
+  }
+  const before = tr.focus;
+  tr.ingestInterim('네', t); // 새 결과가 짧게 시작
+  tr.ingestInterim('음 그러니까', t); // 원고에 없는 말
+  for (let k = 0; k < 10; k++) step();
+  assert.ok(tr.focus >= before, `focus ${before} → ${tr.focus}`);
+  assert.equal(tr.current(), 4);
+  assert.ok(tr.cursor > 60); // 긴 잠정 결과의 앞부분은 확정됨
+  tr.ingestFinal(said, t); // 늦게 온 확정 결과
+  assert.ok(tr.focus >= before);
+});
+
+test('오류 섞인 잠정·확정 결과가 뒤섞여 와도 위치는 뒤로 가지 않는다', () => {
+  const m = sampleModel();
+  const tr = new C.Tracker(m);
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  const rand = rng(11);
+  let t = 0;
+  let maxFocus = 0;
+  let utter = '';
+  for (let s = 0; s < 30; s++) {
+    const words = m.sentences[s].text.split(' ');
+    for (const w of words) {
+      utter += (utter ? ' ' : '') + w;
+      for (let k = 0; k < 6; k++) {
+        t += 0.05;
+        f.step(0.05, rand() > 0.15, Math.max(tr.cursor, tr.tentCursor), 'follow');
+        tr.setPred(Math.max(f.pos, tr.pred), t);
+      }
+      const r = rand();
+      if (r < 0.1) tr.ingestInterim('네', t);
+      else if (r < 0.15) tr.ingestInterim('어 잠깐만요', t);
+      else tr.ingestInterim(noisy(utter, rand), t);
+      if (rand() < 0.08) {
+        tr.ingestFinal(noisy(utter, rand), t);
+        utter = '';
+      }
+      assert.ok(tr.focus >= maxFocus, `s${s}: ${maxFocus} → ${tr.focus}`);
+      maxFocus = tr.focus;
+    }
+  }
+  assert.ok(tr.current() >= 28, `sentence ${tr.current()}`);
+});
+
+test('되돌리기는 확정 위치 아래로 가지 않는다', () => {
+  const m = sampleModel();
+  const tr = new C.Tracker(m);
+  tr.ingestFinal(m.sentences[0].text + ' ' + m.sentences[1].text, 3);
+  tr.setPred(150, 4);
+  tr.correctTo(20, 5);
+  assert.equal(tr.focus, Math.max(20, tr.cursor));
+  tr.correctTo(0, 6);
+  assert.equal(tr.focus, tr.cursor);
+});
