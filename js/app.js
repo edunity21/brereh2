@@ -37,6 +37,8 @@ const DEFAULTS = {
   forbidden: '',
   overrides: {},
   overrideSig: '',
+  localASR: false,
+  localStatus: '',
 };
 const S = { ...DEFAULTS, ...store.get('br.settings', {}) };
 const saveSettings = () => store.set('br.settings', S);
@@ -48,11 +50,15 @@ const LEVEL_HINT = {
   hidden: '자막이 빈칸으로만 보이고 말한 부분만 드러납니다. 4초 이상 막히면 다음 어절을 흐리게 보여 줍니다.',
 };
 const MODE_HINT = {
-  auto: '말하는 소리를 알아듣고 자막 위치를 따라갑니다. 어긋나면 ◀ ▶로 바로잡습니다.',
-  manual: '문장을 말한 뒤 자막을 탭하거나 ▶(키보드 →, 프레젠터)를 눌러 넘깁니다. 음성 인식이 안 되는 기기에서도 됩니다.',
+  auto: '말을 알아듣고 자막 위치를 정확히 따라갑니다. 인식이 잠깐 끊겨도 목소리를 감지해 자막이 계속 이어집니다. 어긋나면 ◀ ▶로 바로잡습니다.',
+  voice: '음성 인식 없이 목소리가 나는 동안 자막을 채우고, 말을 쉬면 다음 문장으로 넘어갑니다. 인터넷이 없어도, 어느 기기에서도 끊기지 않습니다. 위치는 추정이라 가끔 ◀ ▶로 맞춰 주세요.',
+  manual: '문장을 말하는 동안 자막이 채워지고, 다 말하면 자막을 탭하거나 ▶(키보드 →, 프레젠터)를 눌러 넘깁니다.',
 };
-const STATUS_LABEL = { ok: '말함', partial: '일부', missed: '누락', notReached: '미도달', manual: '넘김' };
+const MODE_NAME = { auto: '음성 인식', voice: '음성 감지', manual: '탭 넘기기' };
+const STATUS_LABEL = { ok: '말함', partial: '일부', missed: '누락', notReached: '미도달', manual: '넘김', estimated: '추정' };
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let localASR = null; // 기기 안 음성 인식 확인 결과(이번 화면에서): 'checking' | 'available' | 'downloadable' | 'downloading' | 'unavailable'
+const localReady = () => S.localASR && S.localStatus === 'available';
 
 const wake = new WakeLock();
 let model = null;
@@ -272,7 +278,7 @@ function renderEnv() {
     ['보안 연결', window.isSecureContext, window.isSecureContext ? '' : 'https 주소 필요'],
     ['카메라·마이크', !!navigator.mediaDevices?.getUserMedia, ''],
     ['녹화', mime !== null, mime ? extOf(mime).toUpperCase() : ''],
-    ['음성 인식', Speech.supported(), Speech.supported() ? (IS_IOS ? '끊길 수 있음' : '') : '탭해서 넘기기 사용'],
+    ['음성 인식', Speech.supported(), Speech.supported() ? (localReady() ? '기기 안 처리' : IS_IOS ? '음성 감지 권장' : '') : '음성 감지 사용'],
     ['기기 저장', DB.available(), ''],
   ];
   $('#env').innerHTML = items
@@ -303,7 +309,7 @@ async function renderHistory() {
           <span class="h-bar"><i class="st-bg-${st}" style="width:${((s.durationSec / maxDur) * 100).toFixed(1)}%"></i></span>
           <span class="h-dur">${fmt(s.durationSec)}</span>
           <span class="h-delta st-${st}">${C.fmtDelta(s.durationSec - s.targetSec)}</span>
-          <span class="h-meta">${lv} · ${s.mode === 'auto' ? '음성 인식' : '탭 넘기기'}${s.mode === 'auto' && miss ? ` · 놓친 문장 ${miss}` : ''}</span>
+          <span class="h-meta">${lv} · ${MODE_NAME[s.mode] || ''}${s.mode === 'auto' && miss ? ` · 놓친 문장 ${miss}` : ''}</span>
         </button></li>`;
       })
       .join('');
@@ -318,7 +324,56 @@ function syncSegs() {
     $$(`${id} button`).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === S[key])));
   }
   $('#level-hint').textContent = LEVEL_HINT[S.level];
-  $('#mode-hint').textContent = MODE_HINT[S.mode] + (S.mode === 'auto' && !Speech.supported() ? ' (이 브라우저는 음성 인식을 지원하지 않아 탭해서 넘기기로 진행합니다.)' : '');
+  let extra = '';
+  if (S.mode === 'auto' && !Speech.supported()) extra = ' (이 브라우저는 음성 인식이 없어 음성 감지로 진행합니다.)';
+  else if (S.mode === 'auto' && IS_IOS) extra = ' 아이폰·아이패드는 음성 인식이 자주 끊기므로 "음성 감지"를 권장합니다.';
+  $('#mode-hint').textContent = MODE_HINT[S.mode] + extra;
+  renderLocalASR();
+}
+
+/** 기기 안 음성 인식(Chrome 최신, 실험 기능): 사용자가 켤 때만 확인합니다. */
+function renderLocalASR() {
+  const el = $('#local-asr');
+  if (!el) return;
+  const hasAPI = typeof window.SpeechRecognition?.available === 'function';
+  if (S.mode !== 'auto' || !hasAPI) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const st = localASR || S.localStatus;
+  let msg;
+  if (!S.localASR) msg = '이 기기 안에서 처리하면 인터넷 없이 더 빠르고 덜 끊깁니다. (Chrome 최신 · 실험 기능)';
+  else if (st === 'checking') msg = '확인하는 중…';
+  else if (st === 'available') msg = '<b>사용 중</b> — 이 기기에서 한국어를 처리합니다.';
+  else if (st === 'downloading') msg = '한국어 자료를 내려받는 중입니다…';
+  else if (st === 'downloadable') msg = '한국어 자료가 필요합니다. <button type="button" class="ghost small" id="btn-local">내려받기</button>';
+  else msg = '이 기기에서는 쓸 수 없어 서버 인식을 씁니다.';
+  el.innerHTML = `<label class="toggle"><input type="checkbox" id="chk-local" ${S.localASR ? 'checked' : ''}><span>기기 안 음성 인식</span></label><span class="local-msg">${msg}</span>`;
+  $('#chk-local').addEventListener('change', async (e) => {
+    S.localASR = e.target.checked;
+    saveSettings();
+    if (S.localASR) {
+      localASR = 'checking';
+      renderLocalASR();
+      localASR = (await Speech.checkLocal('ko-KR')) || 'unavailable';
+      S.localStatus = localASR;
+      saveSettings();
+    }
+    renderLocalASR();
+    renderEnv();
+  });
+  $('#btn-local')?.addEventListener('click', async () => {
+    localASR = 'downloading';
+    renderLocalASR();
+    const ok = await Speech.installLocal('ko-KR');
+    localASR = ok ? 'available' : (await Speech.checkLocal('ko-KR')) || 'unavailable';
+    S.localStatus = localASR;
+    saveSettings();
+    toast(ok ? '기기 안 음성 인식을 쓸 수 있습니다' : '내려받지 못했습니다. 서버 인식으로 진행합니다.', ok ? '' : 'warn');
+    renderLocalASR();
+    renderEnv();
+  });
 }
 
 function initSetup() {
@@ -465,7 +520,7 @@ async function openStage() {
 }
 
 function newSession(stream) {
-  const mode = S.mode === 'auto' && Speech.supported() ? 'auto' : 'manual';
+  const mode = S.mode === 'auto' ? (Speech.supported() ? 'auto' : 'voice') : S.mode === 'voice' ? 'voice' : 'manual';
   return {
     stream,
     mode,
@@ -496,6 +551,9 @@ function newSession(stream) {
     voiceAt: 0,
     asrStatus: mode === 'auto' ? 'idle' : 'manual',
     paceRate: null,
+    vad: new C.VoiceActivity(),
+    follower: new C.VoiceFollower(model, { rate: Math.min(9, Math.max(4, S.rateSpm / 60 / 0.8)) }),
+    followMode: '',
     refreshStreak: 0,
     lastRefreshAt: 0,
     lastWarnToast: 0,
@@ -543,7 +601,10 @@ function renderAsrChip() {
     blocked: ['멈춤 · 눌러서 다시 듣기', 'bad'],
     manual: ['탭해서 넘기기', 'manual'],
   };
-  const [text, cls] = R.mode === 'manual' ? map.manual : map[R.asrStatus] || map.idle;
+  let [text, cls] = R.mode === 'manual' ? map.manual : map[R.asrStatus] || map.idle;
+  if (R.mode === 'voice') [text, cls] = R.modeStart === 'auto' ? ['인식 꺼짐 · 눌러서 켜기', 'warn'] : ['음성 감지', 'manual'];
+  else if (R.mode === 'auto' && R.speech?.blocked) [text, cls] = ['인식 꺼짐 · 눌러서 켜기', 'warn'];
+  else if (R.mode === 'auto' && R.state === 'recording' && R.followMode === 'lead') [text, cls] = ['목소리로 잇는 중', 'warn'];
   chip.textContent = text;
   chip.className = `chip ${cls}`;
 }
@@ -622,16 +683,9 @@ function renderSubs() {
 
 /* ── 시간 예측 ── */
 
-function effCursor(t) {
-  const tr = R.tracker;
-  let c = tr.focus;
-  if (R.mode === 'manual') {
-    // 수동 모드: 현재 문장을 말하는 중인 만큼을 추정해 더합니다.
-    const s = tr.current();
-    const sen = model.sentences[s];
-    if (sen && tr.enter[s] != null) c += Math.min((sen.u1 - sen.u0) * 0.9, Math.max(0, t - tr.enter[s]) * R.rate);
-  }
-  return c;
+function effCursor() {
+  // 확정 위치 + 잠정 인식 + 음성 감지로 채운 위치 중 가장 앞
+  return R.tracker.focus;
 }
 
 function updatePrediction(t) {
@@ -756,6 +810,9 @@ async function startRecording() {
 
 function startSpeech(ses) {
   ses.speech = new Speech({
+    track: ses.stream.getAudioTracks()[0] || null, // 녹화와 같은 마이크를 인식기에 넘겨 충돌을 피함(지원 브라우저)
+    local: localReady(),
+    phrases: localReady() ? C.biasPhrases(model) : [],
     onInterim: (txt) => {
       if (R !== ses || ses.state !== 'recording') return;
       ses.pendingInterim = txt;
@@ -790,13 +847,16 @@ function startSpeech(ses) {
     },
     onError: (code, kind) => {
       if (R !== ses) return;
-      // 처음부터 시작이 안 될 때만 자동으로 탭해서 넘기기로 바꿉니다.
-      if (kind === 'fatal') return fallbackManual(code);
+      // 처음부터 시작이 안 될 때만 음성 감지로 바꿉니다.
+      if (kind === 'fatal') return fallbackVoice(code);
       if (kind === 'blocked') {
-        banner('음성 인식이 멈췄습니다. [다시 듣기]를 누르면 지금 위치부터 이어서 따라갑니다.', [
-          { label: '다시 듣기', fn: () => restartSpeech() },
-          { label: '탭해서 넘기기로', fn: () => fallbackManual(code) },
-        ]);
+        // 화면을 가리지 않고 음성 감지로 이어 갑니다. 칩이나 자막을 누르면 다시 켜집니다.
+        event('asr-blocked', code);
+        renderAsrChip();
+        if (!ses.blockedToast) {
+          ses.blockedToast = true;
+          toast('음성 인식이 멈춰 목소리 감지로 이어 갑니다. 자막을 누르면 인식이 다시 켜집니다.', 'warn');
+        }
         return;
       }
       // 일시적인 오류는 알아서 다시 연결합니다. 30초에 한 번만 알려 줍니다.
@@ -843,18 +903,28 @@ function restartSpeech() {
   toast('음성 인식을 다시 켰습니다');
 }
 
-function fallbackManual(code) {
-  if (!R || R.mode === 'manual') return;
+/** 음성 인식을 쓸 수 없을 때: 목소리 감지로 자막을 이어 갑니다(녹화는 계속). */
+function fallbackVoice(code) {
+  if (!R || R.mode !== 'auto') return;
   R.speech?.stop();
-  R.mode = 'manual';
-  event('fallback-manual', code);
+  R.mode = 'voice';
+  event('fallback-voice', code);
   const why = {
     'not-allowed': '음성 인식 권한이 없어',
     'service-not-allowed': '이 브라우저에서 음성 인식을 쓸 수 없어',
     'audio-capture': '이 기기는 녹화와 음성 인식이 마이크를 함께 쓰지 못해',
     'language-not-supported': '한국어 음성 인식을 지원하지 않아',
   }[code] || '음성 인식이 멈춰';
-  banner(`${why} '탭해서 넘기기'로 바꿨습니다. 녹화는 계속됩니다.`);
+  banner(`${why} '음성 감지'로 자막을 이어 갑니다. 녹화는 계속됩니다.`, [{ label: '탭해서 넘기기로', fn: () => switchMode('manual') }]);
+  renderAsrChip();
+  renderStage();
+}
+
+function switchMode(mode) {
+  if (!R) return;
+  if (mode !== 'auto') R.speech?.stop();
+  R.mode = mode;
+  event('mode', mode);
   renderAsrChip();
   renderStage();
 }
@@ -877,16 +947,55 @@ function checkForbidden(text, t) {
 
 function meterLoop(ses) {
   const bar = $('#meter');
+  let last = performance.now();
   const loop = () => {
     if (R !== ses || ses.state === 'stopping') return;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    let voiced = false;
     if (ses.meter?.ok) {
       const lv = ses.meter.level();
       bar.style.transform = `scaleX(${lv.toFixed(3)})`;
-      if (lv > 0.14 && ses.state === 'recording') ses.voiceAt = performance.now();
+      voiced = ses.vad.update(lv, dt);
+      bar.classList.toggle('on', voiced);
+      if (voiced && ses.state === 'recording') ses.voiceAt = now;
     }
+    if (ses.state === 'recording') followStep(ses, dt, voiced, now);
     ses.raf = requestAnimationFrame(loop);
   };
   loop();
+}
+
+/** 음성 인식이 잘 되는지: 최근 3초 안에 결과가 있었는가 */
+function asrHealthy(ses, now) {
+  return ses.mode === 'auto' && ses.speech && !ses.speech.blocked && now - ses.lastAsrAt < 3000;
+}
+
+/**
+ * 말하는 동안 자막을 음절 단위로 부드럽게 채웁니다.
+ * 음성 인식이 잘 되면 인식 위치보다 조금 앞서(follow), 끊기면 목소리만으로(lead), 탭 모드는 문장 안에서만(hold).
+ */
+function followStep(ses, dt, voiced, now) {
+  const tr = ses.tracker;
+  const fm = ses.mode === 'manual' ? 'hold' : ses.mode === 'voice' ? 'lead' : asrHealthy(ses, now) ? 'follow' : 'lead';
+  if (fm !== ses.followMode) {
+    ses.followMode = fm;
+    renderAsrChip();
+  }
+  const anchor = Math.max(tr.cursor, tr.tentCursor);
+  // 음성 감지로 앞서 나갔는데 음성 인식이 돌아와 실제 위치가 뒤라면 되돌립니다
+  if (fm === 'follow' && ses.follower.pos > anchor + 25) {
+    ses.follower.reset(anchor);
+    tr.setPred(anchor, elapsed());
+    renderSubs();
+  }
+  if (ses.follower.step(dt, voiced, anchor, fm)) {
+    const before = tr.current();
+    tr.setPred(ses.follower.pos, elapsed());
+    if (tr.current() !== before) ses.peekLevel = 0;
+    renderSubs();
+  }
 }
 
 function tick() {
@@ -923,13 +1032,6 @@ function tick() {
       ses.lastRefreshAt = now;
       ses.refreshStreak++;
       ses.speech.refresh('watchdog');
-      if (ses.refreshStreak >= 3 && !ses.frozen) {
-        ses.frozen = true;
-        banner('음성 인식이 응답하지 않아 계속 다시 연결하고 있습니다. ▶로 넘기며 이어 가도 됩니다.', [
-          { label: '다시 듣기', fn: () => restartSpeech() },
-          { label: '탭해서 넘기기로', fn: () => fallbackManual('stall') },
-        ]);
-      }
     }
   }
 
@@ -1089,6 +1191,8 @@ function moveSentence(dir) {
   const t = elapsed();
   if (dir > 0) R.tracker.next(t, R.mode === 'manual');
   else R.tracker.prev(t);
+  if (dir > 0) R.tracker.pred = Math.max(R.tracker.pred, R.tracker.cursor);
+  R.follower.reset(R.tracker.focus);
   R.peekLevel = 0;
   event(dir > 0 ? 'next' : 'prev', R.tracker.current());
   renderSubs();
@@ -1106,7 +1210,9 @@ function initStage() {
   $('#btn-next').addEventListener('click', () => moveSentence(1));
   $('#btn-prev').addEventListener('click', () => moveSentence(-1));
   $('#subs').addEventListener('click', () => {
-    if (R?.mode === 'manual' && R.state === 'recording') moveSentence(1);
+    if (!R || R.state !== 'recording') return;
+    if (R.mode === 'manual') moveSentence(1);
+    else if ((R.mode === 'auto' && R.speech?.blocked) || (R.mode === 'voice' && R.modeStart === 'auto')) restartSpeech();
   });
   $('#btn-close').addEventListener('click', closeStage);
   $('#asr-chip').addEventListener('click', () => {
@@ -1174,14 +1280,17 @@ async function openReview(id, direct = null) {
   const fileName = `발표연습_${stamp(rec.createdAt)}.${ext}`;
   const lvText = { full: '전체 보기', hint: '첫 글자', hidden: '숨김' }[rec.level];
   const auto = rec.mode === 'auto';
+  const voice = rec.mode === 'voice';
   const c = sum.count;
   const cards = [
     ['총 시간', fmt(rec.durationSec), `목표 ${fmt(rec.targetSec)}`, ''],
     ['목표 대비', C.fmtDelta(sum.delta), C.STATUS_TEXT[st], `st-${st}`],
     ['평균 속도', `${sum.spm}`, '음절/분', ''],
     auto
-      ? ['인식된 문장', `${c.ok}/${sum.total}`, `일부 ${c.partial} · 누락 ${c.missed}`, c.missed ? 'st-over' : '']
-      : ['넘긴 문장', `${c.manual}/${sum.total}`, `미도달 ${c.notReached}`, ''],
+      ? ['인식된 문장', `${c.ok}/${sum.total}`, `일부 ${c.partial} · 누락 ${c.missed}${c.estimated ? ` · 추정 ${c.estimated}` : ''}`, c.missed ? 'st-over' : '']
+      : voice
+        ? ['지나간 문장', `${c.estimated + c.ok + c.partial}/${sum.total}`, '목소리 감지로 추정', '']
+        : ['넘긴 문장', `${c.manual}/${sum.total}`, `미도달 ${c.notReached}`, ''],
     ['힌트', `${rec.hints}`, lvText, ''],
     ['금칙어', `${rec.forbidden.length}`, rec.forbidden.length ? [...new Set(rec.forbidden.map((f) => f.word))].join(', ') : '없음', rec.forbidden.length ? 'st-over' : ''],
   ];
@@ -1206,7 +1315,7 @@ async function openReview(id, direct = null) {
     .map((s, i) => {
       const prevSec = i > 0 ? rec.sentences[i - 1].sectionId : -1;
       const head = s.sectionId !== prevSec ? `<li class="sec-head">${s.sectionId + 1}. ${esc(rec.sections[s.sectionId].title)}</li>` : '';
-      const ratio = auto && s.status !== 'notReached' ? ` <small>${Math.round(s.ratio * 100)}%</small>` : '';
+      const ratio = auto && s.status !== 'notReached' && s.status !== 'estimated' ? ` <small>${Math.round(s.ratio * 100)}%</small>` : '';
       return `${head}<li class="sent ${s.status}" data-i="${i}" ${s.t != null ? `data-t="${s.t}"` : ''}>
         <span class="time">${s.t != null ? fmt(s.t) : '—'}</span>
         <span class="badge">${STATUS_LABEL[s.status]}${ratio}</span>
@@ -1222,7 +1331,7 @@ async function openReview(id, direct = null) {
       <div class="rv-title">
         <p class="eyebrow">연습 결과</p>
         <h1>${dateText(rec.createdAt)}</h1>
-        <p class="muted">${auto ? '음성 인식' : '탭해서 넘기기'} · ${lvText}${rec.modeStart !== rec.mode ? ' · 도중에 탭해서 넘기기로 전환' : ''}${rec.reason === 'limit' ? ' · 15분 한도로 자동 종료' : ''}</p>
+        <p class="muted">${MODE_NAME[rec.modeStart] || ''} · ${lvText}${rec.modeStart !== rec.mode ? ` · 도중에 ${MODE_NAME[rec.mode]}(으)로 전환` : ''}${rec.reason === 'limit' ? ' · 15분 한도로 자동 종료' : ''}</p>
       </div>
       <button type="button" class="primary" id="rv-again">다시 연습</button>
     </header>

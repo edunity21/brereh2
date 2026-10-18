@@ -107,9 +107,11 @@
       <span class="label">위치 따라가기</span>
       <div class="seg" id="mode" role="radiogroup" aria-label="위치 따라가기">
         <button type="button" data-v="auto">음성 인식</button>
+        <button type="button" data-v="voice">음성 감지</button>
         <button type="button" data-v="manual">탭해서 넘기기</button>
       </div>
       <p class="hint" id="mode-hint"></p>
+      <p class="local-asr" id="local-asr" hidden></p>
       <label class="toggle"><input type="checkbox" id="mirror"><span>거울처럼 좌우 반전해서 보기</span></label>
       <details>
         <summary>발음 사전 · 금칙어 · 화질</summary>

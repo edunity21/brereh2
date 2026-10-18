@@ -300,7 +300,7 @@ summary { cursor: pointer; font-size: 14px; font-weight: 650; color: var(--accen
 
 .w, .p { transition: color 0.22s ease; }
 .w.todo, .p.todo { color: var(--todo); }
-.w.tent, .p.tent { color: var(--tent); }
+.w.tent, .p.tent, .w.pred, .p.pred { color: var(--tent); }
 .w.said, .p.said { color: var(--said); }
 .w.gap, .p.gap { color: var(--gap); }
 .w.gap { text-decoration: underline dotted 2px; text-underline-offset: 0.24em; }
@@ -487,3 +487,20 @@ body[data-view="stage"] .toast { bottom: auto; top: 46%; }
 /* 자막 크기 버튼 */
 .fs-s { font-size: 12px; }
 .fs-l { font-size: 19px; line-height: 1; }
+
+/* 음성 감지 표시 */
+.meter i.on { filter: brightness(1.25); }
+.local-asr { margin: 8px 0 0; padding: 8px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.local-asr[hidden] { display: none; }
+.seg button { padding: 0 4px; }
+.sent.estimated .badge { background: #e0f2fe; color: #075985; }
+@media (prefers-color-scheme: dark) { .sent.estimated .badge { background: #0c4a6e; color: #bae6fd; } }
+.rv-sub .estimated { color: #bae6fd; }
+
+/* 상태 표시줄이 좁아도 줄바꿈되지 않게 */
+.rec-state { white-space: nowrap; flex-shrink: 0; }
+.top-right { min-width: 0; }
+.chip { min-width: 0; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; }
+.icon, .meter { flex-shrink: 0; }
+@media (max-width: 400px) { .meter { display: none; } }
+.local-asr .toggle { margin-top: 0; }

@@ -209,6 +209,21 @@ export function unitScore(a, b) {
 
 const GAP = 1;
 
+// 정렬용 작업 버퍼: 매번 새로 만들지 않고 키워 가며 재사용합니다.
+const SCRATCH = { cap: 0, w: 0, a: null, b: null, trace: null, base: null };
+function scratch(m, W) {
+  const need = (m + 1) * W;
+  if (SCRATCH.cap < need || SCRATCH.w < W) {
+    SCRATCH.cap = Math.max(need, SCRATCH.cap);
+    SCRATCH.w = Math.max(W, SCRATCH.w);
+    SCRATCH.trace = new Uint8Array(SCRATCH.cap);
+    SCRATCH.a = new Float32Array(SCRATCH.w);
+    SCRATCH.b = new Float32Array(SCRATCH.w);
+    SCRATCH.base = new Float32Array(SCRATCH.w);
+  }
+  return SCRATCH;
+}
+
 /**
  * 인식 문장(query)을 원고 창(ref[w0..w1))에 국소 정렬합니다.
  * 현재 위치(cursor)에서 멀리 떨어진 곳에서 시작할수록 벌점을 주어
@@ -221,10 +236,11 @@ export function align(query, ref, w0, w1, cursor, opt = {}) {
   const n = w1 - w0;
   if (!m || n <= 0) return null;
   const W = n + 1;
-  let prev = new Float32Array(W).fill(-1e9);
-  let curr = new Float32Array(W);
-  const trace = new Uint8Array((m + 1) * W);
-  const base = new Float32Array(n);
+  const buf = scratch(m, W);
+  let prev = buf.a.subarray(0, W).fill(-1e9);
+  let curr = buf.b.subarray(0, W);
+  const trace = buf.trace.subarray(0, (m + 1) * W);
+  const base = buf.base.subarray(0, n);
   for (let j = 0; j < n; j++) {
     const r = w0 + j;
     base[j] = -(r >= cursor ? (r - cursor) * jumpPen : (cursor - r) * backPen);
@@ -318,6 +334,7 @@ export class Tracker {
     this.tent = new Uint8Array(this.N);
     this.cursor = 0;
     this.tentCursor = 0;
+    this.pred = 0; // 음성 감지로 미리 채운 위치(소수)
     const S = model.sentences.length;
     this.enter = new Array(S).fill(null);
     this.first = new Array(S).fill(null);
@@ -328,7 +345,7 @@ export class Tracker {
   }
 
   get focus() {
-    return Math.max(this.cursor, this.tentCursor);
+    return Math.max(this.cursor, this.tentCursor, Math.floor(this.pred));
   }
 
   sentenceOfUnit(u) {
@@ -437,9 +454,24 @@ export class Tracker {
     this.cursor = u0;
     this.tent.fill(0);
     this.tentCursor = u0;
+    this.pred = u0;
     this.enter[target] = t;
     this.lastProgress = t;
     return true;
+  }
+
+  /** 음성 감지(VoiceFollower)가 계산한 위치를 반영 */
+  setPred(p, t) {
+    const before = Math.floor(this.pred);
+    p = Math.max(0, Math.min(this.N, p));
+    if (p < this.pred) {
+      // 음성 감지가 앞서 나갔다가 음성 인식이 바로잡은 경우: 앞선 문장의 시작 시각을 지웁니다
+      const s = this.sentenceOfUnit(Math.max(this.cursor, this.tentCursor, Math.floor(p)));
+      for (let k = s + 1; k < this.m.sentences.length; k++) if (this.first[k] == null) this.enter[k] = null;
+    }
+    this.pred = p;
+    if (Math.floor(this.pred) > before) this.lastProgress = t;
+    this._enter(t);
   }
 
   _enter(t) {
@@ -458,6 +490,7 @@ export class Tracker {
     if (said) return 'said';
     if (tent) return 'tent';
     if (seg.u1 <= this.cursor) return 'gap';
+    if (seg.u0 < this.pred) return 'pred';
     return 'todo';
   }
 
@@ -472,8 +505,9 @@ export class Tracker {
       }
       const ratio = n ? (said + manual) / n : 1;
       let status;
+      const passedByVoice = s.u1 <= Math.floor(this.pred) || (s.u0 < this.pred && this.sentenceOfUnit(this.focus) > s.id);
       if (manual) status = 'manual';
-      else if (s.u0 >= this.cursor && said === 0) status = 'notReached';
+      else if (said === 0 && s.u0 >= this.cursor) status = passedByVoice ? 'estimated' : 'notReached';
       else if (ratio >= 0.7) status = 'ok';
       else if (ratio >= 0.35) status = 'partial';
       else status = 'missed';
@@ -621,7 +655,7 @@ export function findForbidden(text, words, dict) {
 /* ───────────── 8. 결과 요약 ───────────── */
 
 export function summarize({ stats, durationSec, targetSec, covered, N }) {
-  const count = { ok: 0, partial: 0, missed: 0, notReached: 0, manual: 0 };
+  const count = { ok: 0, partial: 0, missed: 0, notReached: 0, manual: 0, estimated: 0 };
   for (const s of stats) count[s.status] = (count[s.status] || 0) + 1;
   const spm = durationSec > 0 ? Math.round((covered / durationSec) * 60) : 0;
   return {
@@ -745,4 +779,138 @@ export function humanDuration(sec) {
 export function humanDelta(delta) {
   if (Math.abs(delta) < 5) return '목표와 거의 같음';
   return `목표보다 ${humanDuration(delta)} ${delta < 0 ? '일찍' : '늦게'}`;
+}
+
+/* ───────────── 12. 음성 감지와 부드러운 진행 ───────────── */
+
+/**
+ * 마이크 크기로 '말하는 중'인지 판단합니다 (음성 인식과 무관하게 모든 기기에서 동작).
+ * 잡음 바닥을 따라가며 문턱을 정하고, 음절 사이 짧은 틈은 hangover로 이어 줍니다.
+ */
+export class VoiceActivity {
+  constructor({ hangover = 0.22, minThreshold = 0.07 } = {}) {
+    this.noise = 0.03;
+    this.hang = 0;
+    this.voiced = false;
+    this.hangover = hangover;
+    this.minThreshold = minThreshold;
+    this.threshold = minThreshold;
+  }
+
+  update(level, dt) {
+    const k = level < this.noise ? Math.min(1, dt * 4) : Math.min(1, dt * 0.05);
+    this.noise += (level - this.noise) * k;
+    this.threshold = Math.max(this.minThreshold, this.noise * 2.2 + 0.03);
+    if (level > this.threshold) {
+      this.hang = this.hangover;
+      this.voiced = true;
+    } else {
+      this.hang -= dt;
+      if (this.hang <= 0) this.voiced = false;
+    }
+    return this.voiced;
+  }
+}
+
+/**
+ * 말하는 동안 자막을 음절 단위로 부드럽게 채웁니다.
+ * - follow: 음성 인식이 잘 될 때. 확정 위치보다 최대 10음절만 앞서 채워 인식 지연을 메웁니다.
+ * - lead:   음성 인식 없이(또는 인식이 멈췄을 때). 문장 끝까지 채우고, 말이 쉬면 다음 문장으로 넘어갑니다.
+ * - hold:   탭해서 넘기기. 문장 끝까지만 채우고 넘기지는 않습니다.
+ * 말하는 속도(유성 구간 초당 음절)는 인식 결과나 문장별 실제 시간으로 계속 보정합니다.
+ */
+export class VoiceFollower {
+  constructor(model, { rate = 6 } = {}) {
+    this.m = model;
+    this.rate = rate;
+    this.learnUnits = 0;
+    this.learnVoiced = 0;
+    this.lastAnchor = 0;
+    this.reset(0);
+  }
+
+  reset(pos) {
+    this.pos = pos;
+    this.silence = 0;
+    this.voicedInSentence = 0;
+    this.sid = this._sid(pos);
+    this.lastAnchor = Math.min(this.lastAnchor, pos);
+  }
+
+  _sid(u) {
+    if (u >= this.m.N) return this.m.sentences.length;
+    return this.m.units[Math.max(0, Math.floor(u))].sid;
+  }
+
+  /** 위치(정수)나 문장이 바뀌면 true */
+  step(dt, voiced, anchor, mode) {
+    const S = this.m.sentences;
+    const before = Math.floor(this.pos);
+    if (anchor > this.lastAnchor) {
+      if (mode === 'follow') this.learnUnits += anchor - this.lastAnchor;
+      this.lastAnchor = anchor;
+    }
+    if (anchor > this.pos) this.pos = anchor;
+    const sid = this._sid(this.pos);
+    if (sid !== this.sid) {
+      this.sid = sid;
+      this.voicedInSentence = 0;
+      this.silence = 0;
+    }
+    if (sid >= S.length) return Math.floor(this.pos) !== before;
+    const sen = S[sid];
+
+    if (voiced) {
+      this.silence = 0;
+      this.voicedInSentence += dt;
+      if (mode === 'follow') this.learnVoiced += dt;
+      this.pos += this.rate * dt;
+    } else this.silence += dt;
+
+    let limit = sen.u1 - 0.001; // 채우기만으로는 문장을 넘지 않습니다
+    if (mode === 'follow') limit = Math.min(limit, anchor + 10);
+    this.pos = Math.max(anchor, Math.min(this.pos, limit));
+
+    // 음성 인식이 잘 될 때: 확정된 진행량 ÷ 말한 시간으로 속도 보정
+    if (this.learnVoiced >= 4) {
+      const obs = this.learnUnits / this.learnVoiced;
+      if (obs > 1.5) this.rate = clampNum(0.7 * this.rate + 0.3 * obs, 3, 10);
+      this.learnUnits = 0;
+      this.learnVoiced = 0;
+    }
+
+    let advanced = false;
+    if (mode === 'lead') {
+      const n = sen.u1 - sen.u0;
+      const fill = n ? (this.pos - sen.u0) / n : 1;
+      // 많이 채웠을수록 짧은 쉼에도 넘어갑니다 (다 채움 0.3초 … 4분의 1 채움 1.1초)
+      const need = fill >= 0.25 ? 0.3 + 1.1 * Math.max(0, 0.95 - fill) : Infinity;
+      if (this.voicedInSentence >= 0.6 && this.silence >= need) {
+        // 이 문장을 실제로 말한 시간으로 속도 보정 (한 번에 너무 크게 바뀌지 않게)
+        const obs = clampNum(n / this.voicedInSentence, this.rate * 0.75, this.rate * 1.35);
+        this.rate = clampNum(0.75 * this.rate + 0.25 * obs, 3, 10);
+        this.pos = sen.u1;
+        this.sid = this._sid(this.pos);
+        this.voicedInSentence = 0;
+        this.silence = 0;
+        advanced = true;
+      }
+    }
+    return advanced || Math.floor(this.pos) !== before;
+  }
+}
+
+function clampNum(v, a, b) {
+  return Math.max(a, Math.min(b, v));
+}
+
+/** 인식기에 힌트로 줄 표현(영문·약어가 섞인 낱말) */
+export function biasPhrases(model, max = 30) {
+  const set = new Set();
+  for (const s of model.sentences) {
+    for (const w of s.text.split(/[\s,.!?'"“”‘’「」『』()]+/)) {
+      if (/[A-Za-z]/.test(w) && w.length <= 20) set.add(w.replace(/[^A-Za-z0-9가-힣\-]/g, ''));
+    }
+  }
+  return [...set].filter(Boolean).slice(0, max);
 }

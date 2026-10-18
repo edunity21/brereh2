@@ -246,3 +246,53 @@ test('최근 속도와 시간 문구', () => {
   assert.equal(C.humanDelta(38), '목표보다 38초 늦게');
   assert.equal(C.humanDelta(3), '목표와 거의 같음');
 });
+
+test('음성 감지: 잡음 바닥을 따라가며 말하는 구간만 잡는다', () => {
+  const v = new C.VoiceActivity();
+  let on = 0;
+  for (let i = 0; i < 120; i++) if (v.update(0.03 + (i % 3) * 0.005, 1 / 60)) on++; // 조용한 방
+  assert.equal(on, 0);
+  let talk = 0;
+  for (let i = 0; i < 60; i++) if (v.update(0.35, 1 / 60)) talk++; // 말소리
+  assert.ok(talk > 55);
+  for (let i = 0; i < 30; i++) v.update(0.02, 1 / 60); // 0.5초 쉼
+  assert.equal(v.voiced, false);
+});
+
+test('부드러운 진행(lead): 말하는 동안 채우고, 쉬면 다음 문장으로 넘어간다', () => {
+  const m = sampleModel();
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  const tr = new C.Tracker(m);
+  const s0 = m.sentences[0]; // 10음절
+  let t = 0;
+  for (let i = 0; i < 60; i++) { t += 1 / 30; f.step(1 / 30, true, tr.focus, 'lead'); tr.setPred(f.pos, t); } // 2초 말함
+  assert.ok(f.pos <= s0.u1 && f.pos > s0.u1 - 1, `pos ${f.pos}`); // 문장 끝에서 멈춤
+  assert.equal(tr.current(), 0);
+  for (let i = 0; i < 20; i++) { t += 1 / 30; f.step(1 / 30, false, tr.focus, 'lead'); tr.setPred(f.pos, t); } // 0.66초 쉼
+  assert.equal(tr.current(), 1);
+  assert.equal(tr.sentenceStats()[0].status, 'estimated');
+});
+
+test('부드러운 진행(follow): 확정 위치보다 10음절 넘게 앞서지 않는다', () => {
+  const m = sampleModel();
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  for (let i = 0; i < 300; i++) f.step(1 / 30, true, 15, 'follow');
+  assert.ok(f.pos <= 25.001 && f.pos >= 15);
+  const tr = new C.Tracker(m);
+  tr.setPred(f.pos, 1);
+  assert.equal(tr.segState(m.sentences[1].segs.find((g) => !g.punct)), 'pred');
+});
+
+test('부드러운 진행(hold): 탭 모드에서는 문장을 넘기지 않는다', () => {
+  const m = sampleModel();
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  for (let i = 0; i < 200; i++) f.step(1 / 30, i % 50 < 40, 0, 'hold');
+  assert.ok(f.pos < m.sentences[0].u1);
+});
+
+test('인식 힌트 표현', () => {
+  const m = sampleModel();
+  const p = C.biasPhrases(m);
+  assert.ok(p.includes('BRIDGE-AI'));
+  assert.ok(p.includes('ME'));
+});
