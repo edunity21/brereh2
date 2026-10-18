@@ -371,3 +371,23 @@ test('되돌리기는 확정 위치 아래로 가지 않는다', () => {
   tr.correctTo(0, 6);
   assert.equal(tr.focus, tr.cursor);
 });
+
+test('음성 인식 방식(asr): 목소리만으로 미리 칠하지 않고, 문장 끝이 인식된 뒤 잠깐 쉬면 바로 다음 문장', () => {
+  const m = sampleModel();
+  const f = new C.VoiceFollower(m, { rate: 6 });
+  const s0 = m.sentences[0]; // 0~10
+  // 말하고 있지만 인식은 3음절까지만: 그 이상 칠하지 않음
+  for (let i = 0; i < 60; i++) f.step(1 / 30, true, 3, 'asr');
+  assert.equal(f.pos, 3);
+  // 인식이 9음절까지(80% 이상) 오고 0.3초 쉼 → 다음 문장으로
+  for (let i = 0; i < 5; i++) f.step(1 / 30, true, 9, 'asr');
+  assert.equal(f.pos, 9);
+  for (let i = 0; i < 12; i++) f.step(1 / 30, false, 9, 'asr');
+  assert.equal(f.pos, s0.u1);
+  // 문장 중간(50%)에서 쉬면 넘어가지 않음
+  const s1 = m.sentences[1];
+  const mid = s1.u0 + Math.floor((s1.u1 - s1.u0) / 2);
+  for (let i = 0; i < 5; i++) f.step(1 / 30, true, mid, 'asr');
+  for (let i = 0; i < 60; i++) f.step(1 / 30, false, mid, 'asr');
+  assert.equal(f.pos, mid);
+});

@@ -1,9 +1,12 @@
 // 브라우저 음성 인식(Web Speech API) 래퍼
 //
 // 휴대폰·태블릿에서도 오래 버티도록:
-// - 인식기 하나를 만들어 계속 다시 씁니다(매번 새로 만들면 모바일에서 알림음·권한 문제가 잦음).
+// - 모바일에서는 인식기 하나를 계속 다시 씁니다(매번 새로 만들면 알림음·권한 문제가 잦음).
+//   PC에서는 세션마다 새로 만듭니다(Edge·Chrome에서 검증된 방식).
 // - 아이폰·아이패드는 짧은 세션(continuous=false)을 빠르게 이어 붙이는 방식이 더 안정적입니다.
-// - 브라우저가 지원하면 녹화에 쓰는 마이크 트랙을 그대로 인식기에 넘겨 마이크 충돌을 피합니다.
+// - 마이크 입력: 기본은 브라우저 자체 마이크. 말하는데도 결과가 계속 없으면 녹화용 마이크 트랙으로
+//   바꿔 보고(지원 브라우저), 그래도 없으면 다시 바꿉니다. 결과가 들어오는 입력을 찾으면 고정합니다.
+//   (Edge는 트랙을 넘기면 오류 없이 결과를 주지 않는 경우가 있었습니다.)
 // - 브라우저가 지원하면 기기 안 인식(processLocally)과 표현 힌트(phrases)를 씁니다.
 // - 세션이 끝나면 곧바로 다시 시작하고, 오류가 이어지면 간격을 늘립니다.
 // - PC에서는 한 세션을 45초 넘게 쓰면 말이 끊긴 틈에 새 세션으로 바꿉니다(늦어도 90초).
@@ -57,7 +60,10 @@ export class Speech {
     this.onError = onError || (() => {});
     this.onLog = onLog || (() => {});
     this.track = track;
-    this.useTrack = TEST.useTrack ?? !!track;
+    this.useTrack = TEST.useTrack ?? false;
+    this.inputLocked = false;
+    this.reuse = TEST.reuse ?? IS_MOBILE;
+    this.stats = { sessions: 0, interims: 0, finals: 0, errors: 0, inputSwitches: 0 };
     this.local = !!local;
     this.phrases = phrases;
     this.usePhrases = !!(Phrase && phrases.length);
@@ -184,8 +190,25 @@ export class Speech {
     }
   }
 
+  /** 마이크 입력 바꾸기 (말하는데 결과가 계속 없을 때 앱이 부름). 바꿨으면 true */
+  switchInput(reason = '') {
+    if (!this.track || this.inputLocked) return false;
+    this.useTrack = !this.useTrack;
+    this.stats.inputSwitches++;
+    this.onLog('asr-input', (this.useTrack ? 'track' : 'mic') + (reason ? ':' + reason : ''));
+    // 다음 세션은 새 인식기로
+    if (this.running) this._end('input');
+    else this._discard();
+    return true;
+  }
+
+  get input() {
+    return this.useTrack && this.track ? 'track' : 'mic';
+  }
+
   _onStart(rec) {
     if (rec !== this.rec) return;
+    this.stats.sessions++;
     this.onStatus('listening');
     if (this.rotate) {
       clearTimeout(this._rotTimer);
@@ -204,6 +227,7 @@ export class Speech {
     this.lastResultAt = now;
     s.got = true;
     this.everWorked = true;
+    this.inputLocked = true; // 이 입력으로 결과가 들어옴 → 고정
     this.errorStreak = 0;
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -214,10 +238,14 @@ export class Speech {
         s.done.add(i);
         const part = newPart(s.text, txt);
         s.text = part !== txt ? txt : (s.text ? s.text + ' ' : '') + txt;
-        if (part.trim()) this.onFinal(part);
+        if (part.trim()) {
+          this.stats.finals++;
+          this.onFinal(part);
+        }
       } else interim += txt;
     }
     interim = newPart(s.text, interim);
+    if (interim.trim()) this.stats.interims++;
     this.onInterim(interim);
     // PC: 오래 쓴 세션은 말이 끊긴 틈(확정 직후, 잠정 결과 없음)에 새 세션으로 교체
     if (this.rotate && !interim.trim() && now - s.startedAt > ROTATE_AFTER_MS) {
@@ -232,6 +260,7 @@ export class Speech {
     const code = e?.error || 'unknown';
     if (code === 'no-speech' || code === 'aborted') return;
     this.errorStreak++;
+    this.stats.errors++;
     this.onLog('asr-error', code);
     // 표현 힌트를 지원하지 않으면 끄고 계속
     if (/phrase/i.test(code) && this.usePhrases) {
@@ -268,6 +297,10 @@ export class Speech {
     else if (s.got || this.errorStreak === 0) delay = IS_IOS ? 200 : 100;
     else delay = Math.min(4000, 250 * 2 ** Math.min(4, this.errorStreak));
     if (!s.ending) this.onStatus('restarting');
+    if (!this.reuse || s.ending === 'input') {
+      rec.onstart = rec.onresult = rec.onerror = rec.onend = null;
+      this.rec = null;
+    }
     clearTimeout(this._timer);
     this._timer = setTimeout(() => this._begin(), delay);
   }

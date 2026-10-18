@@ -604,7 +604,7 @@ function renderAsrChip() {
   let [text, cls] = R.mode === 'manual' ? map.manual : map[R.asrStatus] || map.idle;
   if (R.mode === 'voice') [text, cls] = R.modeStart === 'auto' ? ['인식 꺼짐 · 눌러서 켜기', 'warn'] : ['음성 감지', 'manual'];
   else if (R.mode === 'auto' && R.speech?.blocked) [text, cls] = ['인식 꺼짐 · 눌러서 켜기', 'warn'];
-  else if (R.mode === 'auto' && R.state === 'recording' && R.followMode === 'lead') [text, cls] = ['목소리로 잇는 중', 'warn'];
+  else if (R.mode === 'auto' && R.state === 'recording' && R.followMode === 'lead') [text, cls] = ['인식 대기 · 위치 추정 중', 'warn'];
   chip.textContent = text;
   chip.className = `chip ${cls}`;
 }
@@ -714,7 +714,14 @@ function renderPace(t, c) {
   const r = live ? C.recentRate(ses.history, t, c, 20) : null;
   if (r != null && !ses.frozen && ses.state === 'recording') ses.paceRate = ses.paceRate == null ? r : ses.paceRate * 0.7 + r * 0.3;
   const p = C.paceAdvice({ t, cursor: c, N: model.N, targetSec: ses.targetSec, nowRate: live ? ses.paceRate : null });
-  const info = C.PACE[p.level];
+  let info = C.PACE[p.level];
+  // 음성 인식 방식인데 인식 결과가 한동안 없으면, 추정 위치로 속도를 판정하지 않습니다
+  if (live && ses.mode === 'auto' && ses.followMode === 'lead' && p.level !== 'over' && p.level !== 'done') {
+    p.level = 'measuring';
+    p.x = 0.5;
+    p.nowSpm = null;
+    info = { word: '인식 대기', tip: '음성 인식이 돌아오면 다시 알려 드려요' };
+  }
   const el = $('#pace');
   el.dataset.level = p.level;
   $('#pace-word').textContent = !live ? '알맞은 속도' : info.word;
@@ -826,7 +833,7 @@ function startSpeech(ses) {
         if (ses.tracker.ingestInterim(ses.pendingInterim, t)) ses.peekLevel = 0;
         checkForbidden(ses.pendingInterim, t);
         renderSubs();
-      }, 120);
+      }, 70);
     },
     onFinal: (txt) => {
       if (R !== ses || ses.state !== 'recording') return;
@@ -981,15 +988,14 @@ function followStep(ses, dt, voiced, now) {
   let fm;
   if (ses.mode === 'manual') fm = 'hold';
   else if (ses.mode === 'voice') fm = 'lead';
-  else if (asrHealthy(ses, now)) fm = 'follow';
-  else if (ses.speech && !ses.speech.blocked && now - ses.lastAsrAt < 8000) fm = 'hold'; // 잠깐 늦는 것: 문장 안에서만 채우고 기다림
-  else fm = 'lead'; // 인식이 한동안 없음: 목소리와 쉼으로 다음 문장까지 이어 감
+  else if (ses.speech && !ses.speech.blocked && now - ses.lastAsrAt < 12000) fm = 'asr'; // 음성 인식 결과로만 색칠
+  else fm = 'lead'; // 인식 결과가 12초 넘게 없음: 목소리와 쉼으로 위치를 추정(다른 표시)
   if (fm !== ses.followMode) {
     ses.followMode = fm;
     renderAsrChip();
   }
   // 음성 감지로 앞서 나갔는데, 음성 인식이 '실제 위치는 25음절 넘게 뒤'라고 연달아 두 번 알려 줄 때만 되돌립니다.
-  if (fm === 'follow' && tr.matchSeq !== ses.seenMatch) {
+  if ((fm === 'follow' || fm === 'asr') && tr.matchSeq !== ses.seenMatch) {
     ses.seenMatch = tr.matchSeq;
     if (tr.lastMatchEnd < ses.follower.pos - 25) ses.behind = (ses.behind || 0) + 1;
     else ses.behind = 0;
@@ -1043,7 +1049,11 @@ function tick() {
     if (((talking && quiet > 7000) || quiet > 20000) && now - ses.lastRefreshAt > 7000) {
       ses.lastRefreshAt = now;
       ses.refreshStreak++;
-      ses.speech.refresh('watchdog');
+      // 말하는데 두 번 연속 결과가 없으면 마이크 입력을 바꿔 봅니다 (브라우저 마이크 ↔ 녹화용 마이크 트랙)
+      // (한 번도 결과가 없었다면 첫 번째에 바로 바꿔 봄)
+      const need = ses.speech.everWorked ? 2 : 1;
+      if (talking && ses.refreshStreak >= need && ses.speech.switchInput('no-results')) ses.refreshStreak = 0;
+      else ses.speech.refresh('watchdog');
     }
   }
 
@@ -1170,6 +1180,7 @@ function buildRecord(ses, t, reason) {
     transcript: ses.transcript,
     events: ses.events,
     asrRestarts: ses.speech?.restarts || 0,
+    asr: ses.speech ? { ...ses.speech.stats, input: ses.speech.input, locked: ses.speech.inputLocked } : null,
     userAgent: navigator.userAgent,
   };
 }
@@ -1347,6 +1358,7 @@ async function openReview(id, direct = null) {
       </div>
       <button type="button" class="primary" id="rv-again">다시 연습</button>
     </header>
+    ${rec.mode === 'auto' && rec.asr && rec.asr.interims + rec.asr.finals < 3 && rec.durationSec > 20 ? '<p class="error">이번 연습에서는 음성 인식 결과가 거의 들어오지 않아 목소리 감지로만 위치를 추정했습니다. 주소창의 마이크 권한과 인터넷 연결을 확인하고, 계속되면 Chrome에서 해 보세요.</p>' : ''}
     ${rec.dbFailed ? '<p class="error">기기 저장 공간이 부족해 영상이 이 화면에만 남아 있습니다. 지금 <b>영상 저장</b>을 눌러 파일로 보관하세요.</p>' : ''}
     <div class="rv-grid">
       <div class="rv-player">

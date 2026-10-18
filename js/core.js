@@ -883,7 +883,7 @@ export class VoiceFollower {
     const S = this.m.sentences;
     const before = Math.floor(this.pos);
     if (anchor > this.lastAnchor) {
-      if (mode === 'follow') this.learnUnits += anchor - this.lastAnchor;
+      if (mode === 'follow' || mode === 'asr') this.learnUnits += anchor - this.lastAnchor;
       this.lastAnchor = anchor;
     }
     if (anchor > this.pos) this.pos = anchor;
@@ -900,9 +900,26 @@ export class VoiceFollower {
     if (voiced) {
       this.silence = 0;
       this.voicedInSentence += dt;
-      if (mode === 'follow') this.learnVoiced += dt;
-      this.pos += this.rate * dt;
+      if (mode === 'follow' || mode === 'asr') this.learnVoiced += dt;
+      if (mode !== 'asr') this.pos += this.rate * dt;
     } else this.silence += dt;
+
+    // asr: 음성 인식이 알려 준 위치만 따릅니다(목소리만으로 미리 칠하지 않음).
+    // 문장 끝 가까이 인식되고 말이 잠깐 멈추면 바로 다음 문장으로 넘깁니다.
+    if (mode === 'asr') {
+      this._learn();
+      const n = sen.u1 - sen.u0;
+      const left = sen.u1 - this.pos;
+      const fill = n ? (this.pos - sen.u0) / n : 1;
+      if ((left <= 2 && this.silence >= 0.15) || (fill >= 0.8 && this.silence >= 0.3)) {
+        this.pos = sen.u1;
+        this.sid = this._sid(this.pos);
+        this.voicedInSentence = 0;
+        this.silence = 0;
+        return true;
+      }
+      return Math.floor(this.pos) !== before;
+    }
 
     let limit = sen.u1 - 0.001; // 채우기만으로는 문장을 넘지 않습니다
     if (mode === 'follow') limit = Math.min(limit, anchor + 10);
@@ -910,13 +927,7 @@ export class VoiceFollower {
     if (this.pos > limit) this.pos = Math.max(start, limit);
     this.pos = Math.max(anchor, this.pos);
 
-    // 음성 인식이 잘 될 때: 확정된 진행량 ÷ 말한 시간으로 속도 보정
-    if (this.learnVoiced >= 4) {
-      const obs = this.learnUnits / this.learnVoiced;
-      if (obs > 1.5) this.rate = clampNum(0.7 * this.rate + 0.3 * obs, 3, 10);
-      this.learnUnits = 0;
-      this.learnVoiced = 0;
-    }
+    this._learn();
 
     let advanced = false;
     if (mode === 'lead') {
@@ -936,6 +947,15 @@ export class VoiceFollower {
       }
     }
     return advanced || Math.floor(this.pos) !== before;
+  }
+
+  // 음성 인식이 잘 될 때: 확정된 진행량 ÷ 말한 시간으로 속도 보정 (인식이 끊겼을 때 추정에 씀)
+  _learn() {
+    if (this.learnVoiced < 4) return;
+    const obs = this.learnUnits / this.learnVoiced;
+    if (obs > 1.5) this.rate = clampNum(0.7 * this.rate + 0.3 * obs, 3, 10);
+    this.learnUnits = 0;
+    this.learnVoiced = 0;
   }
 }
 
